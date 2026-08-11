@@ -1,0 +1,177 @@
+operators:
+- name: Асель
+  op_id: aisha
+  project: Яндекс такси КЗ
+  tg: 7 705 623 23 82
+  monitored: true
+  kcell:
+    login: aisha
+    email: ''
+    extension: '707'
+    role: user
+  legacy:
+    sipuni_id: '210'
+- name: Аня
+  op_id: anya
+  project: ''
+  tg: ''
+  monitored: true
+  kcell:
+    login: anya
+    email: ''
+    extension: '709'
+    role: user
+  legacy: {}
+- name: Балнур
+  op_id: balnur
+  project: Яндекс Еда
+  tg: ''
+  monitored: true
+  kcell:
+    login: balnur
+    email: ''
+    extension: '702'
+    role: user
+  legacy:
+    sipuni_id: '777'
+- name: Данна
+  op_id: danna
+  project: ''
+  tg: ''
+  monitored: true
+  kcell:
+    login: danna
+    email: ''
+    extension: '714'
+    role: user
+  legacy: {}
+- name: Дина
+  op_id: dina
+  project: Яндекс такси КЗ
+  tg: '@DinaYandexGo'
+  monitored: true
+  kcell:
+    login: dina
+    email: ''
+    extension: '704'
+    role: user
+  legacy:
+    sipuni_id: '211'
+- name: Карина
+  op_id: karina
+  project: Яндекс такси КЗ
+  tg: ''
+  monitored: false
+  kcell:
+    login: karina
+    email: ''
+    extension: '711'
+    role: admin
+  legacy:
+    sipuni_id: '217'
+  note: role=admin в Kcell — по умолчанию не мониторим, реши сам(а), нужно ли
+- name: Луиза
+  op_id: luiza
+  project: Яндекс такси КЗ
+  tg: 7 747 160 89 64
+  monitored: true
+  kcell:
+    login: luiza
+    email: ''
+    extension: '703'
+    role: user
+  legacy:
+    sipuni_id: '238'
+- name: Мария
+  op_id: mariya
+  project: Яндекс такси КЗ
+  tg: '@nata_9987'
+  monitored: true
+  kcell:
+    login: mariya
+    email: ''
+    extension: '705'
+    role: user
+  legacy:
+    sipuni_id: '212'
+- name: Артур
+  op_id: mukhameddin
+  project: ''
+  tg: ''
+  monitored: false
+  kcell:
+    login: mukhameddin
+    email: corpsoloffical@gmail.com
+    extension: '701'
+    role: admin
+  legacy: {}
+  note: role=admin в Kcell — по умолчанию не мониторим, реши сам(а), нужно ли
+- name: Наталья
+  op_id: natalya
+  project: Яндекс такси КЗ
+  tg: '@tasha04_04'
+  monitored: true
+  kcell:
+    login: natalya
+    email: ''
+    extension: '706'
+    role: user
+  legacy:
+    sipuni_id: '237'
+- name: Саида
+  op_id: saida
+  project: ''
+  tg: ''
+  monitored: true
+  kcell:
+    login: saida
+    email: ''
+    extension: '715'
+    role: user
+  legacy: {}
+- name: Сейтжан
+  op_id: seytzhan
+  project: ''
+  tg: ''
+  monitored: true
+  kcell:
+    login: seytzhan
+    email: ''
+    extension: '713'
+    role: user
+  legacy: {}
+- name: Умида
+  op_id: umida
+  project: ''
+  tg: ''
+  monitored: true
+  kcell:
+    login: umida
+    email: ''
+    extension: '712'
+    role: user
+  legacy: {}
+- name: Ярик
+  op_id: yarik
+  project: ''
+  tg: ''
+  monitored: true
+  kcell:
+    login: yarik
+    email: ''
+    extension: '710'
+    role: user
+  legacy: {}
+- name: Зафар
+  op_id: zafar
+  project: Яндекс такси КЗ
+  tg: '@Validzhanov777'
+  monitored: true
+  kcell:
+    login: zafar
+    email: ''
+    extension: '708'
+    role: user
+  legacy:
+    sipuni_id: '218'
+project_rops: {}

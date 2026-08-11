@@ -1,12 +1,11 @@
+import re
 from dataclasses import dataclass
 from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional, Tuple
 import pytz
-import re
 
-from sipuni_api import fetch_calls_csv_export_all
-from utils_csv import parse_csv
 from state_store import StateStore
+from providers.base import CallRecord
 
 
 @dataclass
@@ -39,97 +38,19 @@ def _parse_hm(s: str) -> dtime:
     return dtime(h, m)
 
 
-def parse_call_dt(value: str, csv_tz, target_tz):
-    if not value:
-        return None
-    v = str(value).strip()
-    if not v:
-        return None
-    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"):
-        try:
-            naive = datetime.strptime(v, fmt)
-            dt_csv = csv_tz.localize(naive)
-            return dt_csv.astimezone(target_tz)
-        except Exception:
-            pass
-    return None
-
-
-def _norm(s: str) -> str:
-    return str(s or "").strip().lower()
-
-
-def _row_values_text(row: dict) -> str:
-    try:
-        return " ".join(_norm(v) for v in row.values())
-    except Exception:
-        return ""
-
-
-def _pick_first_existing(row: dict, keys: List[str]) -> str:
-    for k in keys:
-        if k in row and row.get(k) not in (None, ""):
-            return str(row.get(k))
-    return ""
-
-
-def _match_operator_row(row: dict, op_id: str, name: str, extra_keys: List[str]) -> bool:
-    op_id = str(op_id).strip()
-    name_n = _norm(name)
-
-    id_val = _pick_first_existing(row, [
-        "ID оператора", "ID Оператора", "Operator ID", "OperatorID",
-        "operator_id", "operatorid", "ID"
-    ])
-    if id_val:
-        id_val_n = re.sub(r"\D", "", str(id_val))
-        op_id_n = re.sub(r"\D", "", op_id)
-        if id_val_n and op_id_n and id_val_n == op_id_n:
-            return True
-
-    op_name_val = _pick_first_existing(row, ["Оператор", "Operator", "operator", "Оператор(ФИО)"])
-    if op_name_val:
-        on = _norm(op_name_val)
-        if on == name_n:
-            return True
-        if name_n and name_n in on:
-            return True
-
-    text = _row_values_text(row)
-
-    if name_n and name_n in text:
-        return True
-
-    op_digits = re.sub(r"\D", "", op_id)
-    if op_digits:
-        if re.search(rf"(?<!\d){re.escape(op_digits)}(?!\d)", text):
-            return True
-
-    for k in extra_keys or []:
-        kn = _norm(k)
-        if not kn:
-            continue
-        kd = re.sub(r"\D", "", kn)
-        if kd and kd.isdigit():
-            if re.search(rf"(?<!\d){re.escape(kd)}(?!\d)", text):
-                return True
-        else:
-            if kn in text:
-                return True
-
-    return False
-
-
 class MonitorService:
-    def __init__(self, cfg, operators: Dict[str, Dict], state: StateStore):
+    def __init__(self, cfg, operators: Dict[str, Dict], state: StateStore, provider, project_rops: Optional[Dict[str, str]] = None):
         self.cfg = cfg
         self.operators = operators
         self.state = state
+        self.provider = provider
+        self.project_rops = project_rops or {}
 
         self.tz = pytz.timezone(cfg.tz)
-        self.csv_tz = pytz.timezone(cfg.sipuni_csv_tz or cfg.tz)
 
     def _mention_or_name(self, name: str) -> str:
+        """Возвращает @username, чтобы Telegram реально пинговал в алертах.
+        Если tg в конфиге не похож на username (телефон/пусто) — просто имя."""
         meta = self.operators.get(name) or {}
         tg = str(meta.get("tg") or "").strip()
 
@@ -155,11 +76,7 @@ class MonitorService:
         return name
 
     def _rop_by_project(self, project: str) -> str:
-        try:
-            from operators_config import PROJECT_ROPS
-            return str(PROJECT_ROPS.get(project) or "").strip()
-        except Exception:
-            return ""
+        return str(self.project_rops.get(project) or "").strip()
 
     def _shift_bounds(self, day: date) -> Optional[Tuple[datetime, datetime]]:
         weekday = day.weekday()
@@ -220,7 +137,7 @@ class MonitorService:
             return end
         return dt
 
-    def _seconds_between(self, segments, a: datetime, b: datetime) -> int:
+    def _seconds_between(self, segments: List[Tuple[datetime, datetime]], a: datetime, b: datetime) -> int:
         if b <= a:
             return 0
         total = 0
@@ -230,6 +147,41 @@ class MonitorService:
             if e > s:
                 total += int((e - s).total_seconds())
         return total
+
+    def _total_inactive_on_interval(
+        self,
+        segments: List[Tuple[datetime, datetime]],
+        shift_start: datetime,
+        interval_end: datetime,
+        calls: List[Tuple[datetime, datetime, object]],
+    ) -> int:
+        """Суммарная неактивность = сумма окон БЕЗ звонков:
+        shift_start -> начало первого звонка, конец звонка i -> начало звонка
+        i+1, конец последнего звонка -> interval_end. Время самих звонков
+        (включая разговор) в неактивность не входит — раньше оно ошибочно
+        включалось, потому что суммировались только точки начала звонков."""
+        if interval_end <= shift_start:
+            return 0
+
+        if not calls:
+            return self._seconds_between(segments, shift_start, interval_end)
+
+        trimmed = []
+        for st, en, r in calls:
+            if st >= interval_end:
+                break
+            trimmed.append((st, min(en, interval_end), r))
+
+        if not trimmed:
+            return self._seconds_between(segments, shift_start, interval_end)
+
+        total = self._seconds_between(segments, shift_start, trimmed[0][0])
+
+        for i in range(len(trimmed) - 1):
+            total += self._seconds_between(segments, trimmed[i][1], trimmed[i + 1][0])
+
+        total += self._seconds_between(segments, trimmed[-1][1], interval_end)
+        return int(total)
 
     def build_snapshot(self):
         now = datetime.now(self.tz)
@@ -242,63 +194,55 @@ class MonitorService:
         shift_start, shift_end = sb
         in_shift_now = self.is_in_shift(now)
         break_now = self.is_in_break(now)
-
         now_clipped = self._clip_to_shift(today, now)
         segments = self._work_segments_excluding_break(today)
 
-        csv_data, err = fetch_calls_csv_export_all(
-            self.cfg.sipuni_user,
-            self.cfg.sipuni_secret,
-            limit=5000,
-            order="desc",
-            page=1,
-        )
-        if not csv_data:
+        records, err = self.provider.fetch_calls(today)
+        if not records and err:
             return [], now, in_shift_now, break_now, err
 
-        _, rows = parse_csv(csv_data)
+        by_operator: Dict[str, List[CallRecord]] = {}
+        for rec in records:
+            by_operator.setdefault(rec.operator_key, []).append(rec)
+
         snapshot: List[OperatorStatus] = []
         min_thr = min(self.cfg.thresholds_minutes) if self.cfg.thresholds_minutes else 15
 
         for name, meta in self.operators.items():
             op_id = str(meta["id"])
-            extra_keys = meta.get("match") or []
 
-            calls: List[datetime] = []
-            last_row = None
-            last_dt = None
+            calls: List[Tuple[datetime, datetime, CallRecord]] = []
+            last_record: Optional[CallRecord] = None
+            last_record_start: Optional[datetime] = None
 
-            for r in rows:
-                if not _match_operator_row(r, op_id, name, extra_keys):
-                    continue
-
-                dt_raw = _pick_first_existing(r, ["Время", "Дата", "Date", "Datetime", "Дата/время"])
-                dt = parse_call_dt(dt_raw, self.csv_tz, self.tz)
-                if not dt or dt.date() != today:
-                    continue
+            for rec in by_operator.get(op_id, []):
+                dt = rec.started_at
                 if not (shift_start <= dt <= shift_end):
                     continue
 
-                calls.append(dt)
+                end_dt = rec.ended_at
+                if end_dt > shift_end:
+                    end_dt = shift_end
 
-                if last_dt is None or dt > last_dt:
-                    last_dt = dt
-                    last_row = r
+                calls.append((dt, end_dt, rec))
 
-            calls.sort()
-            first = calls[0] if calls else None
-            last = calls[-1] if calls else None
+                if last_record_start is None or dt > last_record_start:
+                    last_record_start = dt
+                    last_record = rec
 
-            first_str = first.strftime("%H:%M") if first else "—"
-            last_str = last.strftime("%H:%M") if last else "—"
+            calls.sort(key=lambda x: x[0])
 
-            anchor = last if last else shift_start
+            first_start = calls[0][0] if calls else None
+            last_start = calls[-1][0] if calls else None
+            last_end = calls[-1][1] if calls else None
+
+            first_str = first_start.strftime("%H:%M") if first_start else "—"
+            last_str = last_start.strftime("%H:%M") if last_start else "—"
+
+            anchor = last_end if last_end else shift_start
             current = self._seconds_between(segments, anchor, now_clipped)
 
-            points = [shift_start] + calls + [now_clipped]
-            total = 0
-            for i in range(len(points) - 1):
-                total += self._seconds_between(segments, points[i], points[i + 1])
+            total = self._total_inactive_on_interval(segments, shift_start, now_clipped, calls)
 
             if self.state.is_absent_today(op_id, now):
                 category = "ABSENT"
@@ -312,7 +256,7 @@ class MonitorService:
                     name=name,
                     op_id=op_id,
                     category=category,
-                    last_call_time=last,
+                    last_call_time=last_start,
                     current_inactive_seconds=current,
                     current_inactive_str=fmt_hms(current),
                     calls_today=len(calls),
@@ -320,8 +264,8 @@ class MonitorService:
                     total_inactive_str=fmt_hms(total),
                     first_call_str=first_str,
                     last_call_str=last_str,
-                    from_number=(last_row or {}).get("Откуда"),
-                    to_number=(last_row or {}).get("Куда"),
+                    from_number=(last_record.from_number if last_record else None),
+                    to_number=(last_record.to_number if last_record else None),
                 )
             )
 
