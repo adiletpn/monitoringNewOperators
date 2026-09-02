@@ -10,6 +10,19 @@ from providers import get_provider
 from operators_loader import load_operators_yaml, load_project_rops
 
 
+def parse_start_date(cfg):
+    """MONITOR_START_DATE -> date или None. Кривое значение не должно ронять
+    бота: логируем и считаем, что отложенного старта нет."""
+    raw = (getattr(cfg, "monitor_start_date", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"[CONFIG] MONITOR_START_DATE={raw!r} — не формат YYYY-MM-DD, игнорирую")
+        return None
+
+
 def normalize_command(text: str) -> str:
     if not text:
         return ""
@@ -83,8 +96,19 @@ def main():
 
     run_started_at = datetime.now(tz)
 
+    start_date = parse_start_date(cfg)
+    if start_date and run_started_at.date() < start_date:
+        waiting_line = (
+            f"\n⏸ Мониторинг включится {start_date.strftime('%d.%m.%Y')} "
+            f"в {cfg.work_start} — до этого алертов не будет."
+        )
+    else:
+        waiting_line = ""
+
     tg.send_message(
-        f"🚀 OperatorMonitor запущен (kcell)\n{run_started_at.strftime('%d.%m.%Y %H:%M')} ({cfg.tz})",
+        f"🚀 OperatorMonitor запущен (kcell)\n"
+        f"{run_started_at.strftime('%d.%m.%Y %H:%M')} ({cfg.tz})"
+        f"{waiting_line}",
         chat_id=cfg.tg_chat_id,
         message_thread_id=(cfg.tg_thread_id or None),
     )
@@ -101,6 +125,7 @@ def main():
     snapshot_ts = 0
 
     last_in_shift = False  # для daily по факту окончания смены (обед не влияет)
+    waiting_logged = False  # чтобы не спамить в лог сообщением об отложенном старте
     source_down = False  # чтобы не слать "нет связи с АТС" на каждом тике
 
     def get_snapshot(force: bool = False):
@@ -254,6 +279,18 @@ def main():
             last_check_ts = time.time()
 
             snapshot, updated_at, in_shift, in_break, err = monitor.build_snapshot()
+
+            # отложенный старт: молчим до назначенной даты
+            if start_date and updated_at.date() < start_date:
+                if not waiting_logged:
+                    print(
+                        f"⏸ Ожидание: мониторинг включится {start_date.strftime('%d.%m.%Y')} "
+                        f"в {cfg.work_start}. Алерты и отчёты до этого не отправляются."
+                    )
+                    waiting_logged = True
+                last_in_shift = in_shift
+                time.sleep(1)
+                continue
 
             if err:
                 # ошибка источника: не считаем неактивность и не шлём алерты,

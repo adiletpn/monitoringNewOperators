@@ -88,6 +88,11 @@ class Config:
 
     state_db_path: str = _clean(os.getenv("STATE_DB_PATH", "state.db")) or "state.db"
 
+    # Отложенный старт: до этой даты бот молчит — не шлёт алерты и дневной
+    # отчёт. Формат YYYY-MM-DD, пусто = работать сразу. Нужно, когда бота
+    # выкатили заранее, а следить надо начать с конкретного дня.
+    monitor_start_date: str = _clean(os.getenv("MONITOR_START_DATE", ""))
+
     def __post_init__(self):
         if self.telephony_provider != "kcell":
             raise RuntimeError(f"Invalid TELEPHONY_PROVIDER: {self.telephony_provider!r} (expected 'kcell')")
