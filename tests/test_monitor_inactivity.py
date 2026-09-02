@@ -188,18 +188,26 @@ def test_build_snapshot_total_inactive_is_not_full_elapsed_shift(monkeypatch):
 
 # ---------------- WA = отмена конкретного алерта, БЕЗ заморозки ----------------
 
-def test_wa_cancel_alert_does_not_affect_category_or_inactivity(monkeypatch):
+def test_wa_cancel_alert_freezes_inactivity_until_a_real_call(monkeypatch):
+    """WA = оператор работает в мессенджере: алерт отменяется, накопленная
+    неактивность замораживается на момент нажатия, оператор считается
+    активным. Снимается только реальным новым звонком."""
     calls = [make_call("1", 11, 0, 300)]  # ends 11:05
-    svc = make_service(calls)
-
-    fixed_now = dt(11, 40)  # 35 min after call ended -> INACTIVE (>15m)
+    provider = FakeProvider(calls)
+    svc = MonitorService(
+        FakeCfg(), {"Test": {"id": "1"}}, StateStore(":memory:"), provider,
+        project_rops={},
+    )
 
     import monitor as monitor_mod
+
+    current_now = {"value": dt(11, 40)}  # 35 min after call ended -> INACTIVE
 
     class FrozenDatetime(monitor_mod.datetime):
         @classmethod
         def now(cls, tz=None):
-            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+            v = current_now["value"]
+            return v if tz else v.replace(tzinfo=None)
 
     monkeypatch.setattr(monitor_mod, "datetime", FrozenDatetime)
 
@@ -207,20 +215,35 @@ def test_wa_cancel_alert_does_not_affect_category_or_inactivity(monkeypatch):
     s = svc.find_by_id(snapshot, "1")
     assert s.category == "INACTIVE"
 
-    svc.state.on_operator_inactive("1", fixed_now, s.last_call_time)
-    svc.state.register_alert_sent("1", fixed_now, 15, msg_id=999)
-    assert svc.state.get_alert_count("1", 15, fixed_now) == 1
+    svc.state.on_operator_inactive("1", current_now["value"], s.last_call_time)
+    svc.state.register_alert_sent("1", current_now["value"], 15, msg_id=999)
+    assert svc.state.get_alert_count("1", 15, current_now["value"]) == 1
 
-    ok = svc.state.mark_wa_cancel_alert("1", fixed_now, message_id=999)
+    ok = svc.state.mark_wa_cancel_alert("1", current_now["value"], message_id=999)
     assert ok is True
-    assert svc.state.get_alert_count("1", 15, fixed_now) == 0
-    assert svc.state.get_wa_count("1", fixed_now) == 1
+    assert svc.state.get_alert_count("1", 15, current_now["value"]) == 0
+    assert svc.state.get_wa_count("1", current_now["value"]) == 1
 
-    # WA не морозит расчёт — категория и неактивность считаются как обычно
+    # тик мониторинга без нового звонка: WA держится, неактивность заморожена
+    current_now["value"] = dt(11, 50)
     snapshot2, *_ = svc.build_snapshot()
     s2 = svc.find_by_id(snapshot2, "1")
-    assert s2.category == "INACTIVE"
-    assert s2.current_inactive_seconds == 35 * 60
+    assert s2.wa_active is True
+    assert s2.category == "ACTIVE"
+    assert s2.current_inactive_seconds == 0
+    assert s2.total_inactive_seconds == 35 * 60  # заморожено на моменте нажатия
+
+    # алерты во время WA не идут
+    assert svc.state.get_due_thresholds("1", current_now["value"], 60 * 60, [15, 30, 60]) == []
+
+    # реальный звонок после WA — режим снимается сам
+    provider.records.append(make_call("1", 11, 55, 60))
+    current_now["value"] = dt(12, 5)
+    snapshot3, *_ = svc.build_snapshot()
+    s3 = svc.find_by_id(snapshot3, "1")
+    assert s3.wa_active is False
+    assert svc.state.is_wa_ack_active("1", current_now["value"]) is False
+    assert s3.current_inactive_seconds == 9 * 60  # от конца звонка 11:56 до 12:05
 
 
 def test_wa_cancel_alert_returns_false_for_unknown_message():

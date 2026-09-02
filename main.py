@@ -308,14 +308,17 @@ def main():
                 absent_flag = 1 if state.is_absent_today(s.op_id, updated_at) else 0
 
                 # (A) Синхронизация статуса
-                if not absent_flag:
+                # пока WA реально заморожен — не трогаем status/thresholds,
+                # иначе режим слетит на следующем же тике: monitor.py сам
+                # снимет WA при первом настоящем звонке
+                if not absent_flag and not s.wa_active:
                     if s.category == "INACTIVE":
                         state.on_operator_inactive(s.op_id, updated_at, s.last_call_time)
                     else:
                         state.on_operator_active(s.op_id, updated_at, s.last_call_time)
 
-                # (B) Алерты: только если INACTIVE и не absent
-                if (not absent_flag) and s.category == "INACTIVE":
+                # (B) Алерты: только если INACTIVE, не absent и не активен WA
+                if (not absent_flag) and (not s.wa_active) and s.category == "INACTIVE":
                     due = state.get_due_thresholds(
                         s.op_id, updated_at,
                         s.current_inactive_seconds,

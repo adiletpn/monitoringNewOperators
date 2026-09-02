@@ -19,10 +19,13 @@ class OperatorStatus:
     calls_today: int
     total_inactive_seconds: int
     total_inactive_str: str
+    total_talk_seconds: int
+    total_talk_str: str
     first_call_str: str
     last_call_str: str
     from_number: Optional[str]
     to_number: Optional[str]
+    wa_active: bool = False
 
 
 def fmt_hms(seconds: int) -> str:
@@ -236,7 +239,16 @@ class MonitorService:
             last_start = calls[-1][0] if calls else None
             last_end = calls[-1][1] if calls else None
 
-            first_str = first_start.strftime("%H:%M") if first_start else "—"
+            # суммарное время разговора за смену (сумма длительностей звонков)
+            talk_total = sum(int(rec.duration_sec or 0) for _, _, rec in calls)
+
+            # первый звонок фиксируется один раз за день и больше не меняется
+            if first_start:
+                self.state.set_first_call_if_empty(op_id, today, first_start.strftime("%H:%M"))
+
+            first_str = self.state.get_first_call_locked(op_id, today) or (
+                first_start.strftime("%H:%M") if first_start else "—"
+            )
             last_str = last_start.strftime("%H:%M") if last_start else "—"
 
             anchor = last_end if last_end else shift_start
@@ -244,12 +256,34 @@ class MonitorService:
 
             total = self._total_inactive_on_interval(segments, shift_start, now_clipped, calls)
 
+            # ===== WA "заморозка" =====
+            wa_active = self.state.is_wa_ack_active(op_id, now)
+            wa_at = self.state.get_wa_ack_at(op_id, now)
+
+            # снимается ТОЛЬКО реальным новым звонком после момента нажатия WA,
+            # а не любым тиком мониторинга
+            if wa_active and wa_at and last_start and last_start > wa_at:
+                self.state.clear_wa(op_id, now)
+                wa_active = False
+                wa_at = None
+
+            if wa_active and wa_at:
+                wa_at_clipped = self._clip_to_shift(today, wa_at)
+                if wa_at_clipped > now_clipped:
+                    wa_at_clipped = now_clipped
+
+                total = self._total_inactive_on_interval(segments, shift_start, wa_at_clipped, calls)
+                current = 0
+
             if self.state.is_absent_today(op_id, now):
                 category = "ABSENT"
                 current = 0
                 total = 0
             else:
-                category = "ACTIVE" if (current // 60) < min_thr else "INACTIVE"
+                if wa_active:
+                    category = "ACTIVE"
+                else:
+                    category = "ACTIVE" if (current // 60) < min_thr else "INACTIVE"
 
             snapshot.append(
                 OperatorStatus(
@@ -262,10 +296,13 @@ class MonitorService:
                     calls_today=len(calls),
                     total_inactive_seconds=total,
                     total_inactive_str=fmt_hms(total),
+                    total_talk_seconds=talk_total,
+                    total_talk_str=fmt_hms(talk_total),
                     first_call_str=first_str,
                     last_call_str=last_str,
                     from_number=(last_record.from_number if last_record else None),
                     to_number=(last_record.to_number if last_record else None),
+                    wa_active=wa_active,
                 )
             )
 
@@ -298,6 +335,8 @@ class MonitorService:
             f"📞 Активные звонки: {s.calls_today}\n"
             f"🕒 Первый звонок: {s.first_call_str}\n"
             f"🕒 Последняя попытка: {s.last_call_str}\n"
+            f"🔴 Суммарная неактивность: {s.total_inactive_str}\n"
+            f"🗣 Суммарное время разговора: {s.total_talk_str}\n"
             f"📍 Откуда: {s.from_number or '—'}\n"
             f"📍 Куда: {s.to_number or '—'}"
         )
@@ -313,15 +352,19 @@ class MonitorService:
 
         total_calls = 0
         total_inactive_all = 0
+        total_talk_all = 0
 
         for s in snapshot:
             total_calls += int(s.calls_today or 0)
             total_inactive_all += int(s.total_inactive_seconds or 0)
+            total_talk_all += int(s.total_talk_seconds or 0)
 
             lines.append(
                 f"👤 {self._display_name(s.name)}\n"
                 f"📞 Активные звонки: {s.calls_today}\n"
                 f"⛔ Текущая неактивность: {s.current_inactive_str}\n"
+                f"⛔ Суммарная неактивность: {s.total_inactive_str}\n"
+                f"🗣 Суммарное время разговора: {s.total_talk_str}\n"
                 f"🕒 Первый звонок: {s.first_call_str}\n"
                 f"🕒 Последняя попытка: {s.last_call_str}\n"
                 f"🔘 Статус: {s.category}\n"
@@ -331,7 +374,8 @@ class MonitorService:
         lines.append(
             f"📊 ИТОГО ПО СМЕНЕ\n"
             f"📞 Всего активных звонков: {total_calls}\n"
-            f"⛔ Общая неактивность: {fmt_hms(total_inactive_all)}"
+            f"⛔ Общая неактивность: {fmt_hms(total_inactive_all)}\n"
+            f"🗣 Общее время разговора: {fmt_hms(total_talk_all)}"
         )
         return "\n".join(lines)
 
@@ -366,6 +410,8 @@ class MonitorService:
             f"🆔 ID: {s.op_id}\n\n"
             f"📞 Активные звонки: {s.calls_today}\n"
             f"⛔ Текущая неактивность: {s.current_inactive_str}\n"
+            f"⛔ Суммарная неактивность: {s.total_inactive_str}\n"
+            f"🗣 Суммарное время разговора: {s.total_talk_str}\n"
             f"🕒 Первый звонок: {s.first_call_str}\n"
             f"🕒 Последняя попытка: {s.last_call_str}\n\n"
             f"🔘 Статус: {s.category}"
@@ -388,12 +434,18 @@ class MonitorService:
             "------------------------------",
         ]
         total_calls = 0
+        total_inactive_all = 0
+        total_talk_all = 0
 
         for s in snapshot:
             total_calls += int(s.calls_today or 0)
+            total_inactive_all += int(s.total_inactive_seconds or 0)
+            total_talk_all += int(s.total_talk_seconds or 0)
             lines.append(
                 f"👤 {self._display_name(s.name)}\n"
                 f"📞 Звонков за сегодня: {s.calls_today}\n"
+                f"⛔ Суммарная неактивность: {s.total_inactive_str}\n"
+                f"🗣 Суммарное время разговора: {s.total_talk_str}\n"
                 f"🕒 Первый звонок: {s.first_call_str}\n"
                 f"🕒 Последняя попытка: {s.last_call_str}\n"
                 f"🔘 Статус на конец дня: {s.category}\n"
@@ -403,5 +455,7 @@ class MonitorService:
         lines.append(
             f"📊 ИТОГО\n"
             f"📞 Всего активных звонков: {total_calls}\n"
+            f"⛔ Общая неактивность: {fmt_hms(total_inactive_all)}\n"
+            f"🗣 Общее время разговора: {fmt_hms(total_talk_all)}"
         )
         return "\n".join(lines)
