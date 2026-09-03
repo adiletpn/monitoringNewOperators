@@ -46,15 +46,16 @@ def pick_thread_id_from_message(m: dict, cfg: Config):
     return int(cfg.tg_thread_id) if int(cfg.tg_thread_id or 0) > 0 else None
 
 
-def validate_kcell_operators(provider, operators, tg, cfg):
+def validate_kcell_operators(provider, operators):
     """Сверяет operators.yml с живым списком сотрудников Kcell при старте.
-    Расхождение — WARNING в лог + одно сообщение в Telegram, не тихое
-    молчание (иначе пропавший из конфига оператор выглядит как "не звонит")."""
+
+    Пишет расхождения ТОЛЬКО в лог Railway, без сообщения в чат: админы
+    кабинета исключены из мониторинга намеренно, и напоминание об этом при
+    каждом старте только зашумляло чат.
+    """
     employees, err = provider.fetch_employees()
     if err:
-        msg = f"⚠️ Не удалось сверить operators.yml со списком сотрудников Kcell: {err}"
-        print(f"[OPERATORS] {msg}")
-        tg.send_message(msg, chat_id=cfg.tg_chat_id, message_thread_id=(cfg.tg_thread_id or None))
+        print(f"[OPERATORS] не удалось сверить operators.yml со списком сотрудников Kcell: {err}")
         return
 
     kcell_logins = {e.get("login") for e in employees if e.get("login")}
@@ -63,17 +64,10 @@ def validate_kcell_operators(provider, operators, tg, cfg):
     missing_in_config = sorted(kcell_logins - configured_logins)
     missing_in_kcell = sorted(configured_logins - kcell_logins)
 
-    if not missing_in_config and not missing_in_kcell:
-        return
-
-    lines = ["⚠️ operators.yml разошёлся с составом сотрудников в Kcell"]
     if missing_in_config:
-        lines.append(f"Есть в Kcell, нет в operators.yml (не мониторятся!): {', '.join(missing_in_config)}")
+        print(f"[OPERATORS] есть в Kcell, не мониторятся: {', '.join(missing_in_config)}")
     if missing_in_kcell:
-        lines.append(f"Есть в operators.yml, нет в Kcell (уволен/переименован?): {', '.join(missing_in_kcell)}")
-    msg = "\n".join(lines)
-    print(f"[OPERATORS] {msg}")
-    tg.send_message(msg, chat_id=cfg.tg_chat_id, message_thread_id=(cfg.tg_thread_id or None))
+        print(f"[OPERATORS] есть в operators.yml, нет в Kcell: {', '.join(missing_in_kcell)}")
 
 
 def main():
@@ -97,23 +91,17 @@ def main():
     run_started_at = datetime.now(tz)
 
     start_date = parse_start_date(cfg)
-    if start_date and run_started_at.date() < start_date:
-        waiting_line = (
-            f"\n⏸ Мониторинг включится {start_date.strftime('%d.%m.%Y')} "
-            f"в {cfg.work_start} — до этого алертов не будет."
-        )
-    else:
-        waiting_line = ""
 
-    tg.send_message(
-        f"🚀 OperatorMonitor запущен (kcell)\n"
-        f"{run_started_at.strftime('%d.%m.%Y %H:%M')} ({cfg.tz})"
-        f"{waiting_line}",
-        chat_id=cfg.tg_chat_id,
-        message_thread_id=(cfg.tg_thread_id or None),
+    # В чат при загрузке процесса НИЧЕГО не шлём: передеплой не должен выглядеть
+    # как начало смены. Сообщение "запущен" уходит один раз в день, когда смена
+    # реально начинается (в WORK_START) — см. цикл ниже.
+    print(
+        f"[BOOT] процесс поднят {run_started_at.strftime('%d.%m.%Y %H:%M:%S')} ({cfg.tz}), "
+        f"смена {cfg.work_start}-{cfg.work_end}"
+        + (f", мониторинг с {start_date.strftime('%d.%m.%Y')}" if start_date else "")
     )
 
-    validate_kcell_operators(provider, operators, tg, cfg)
+    validate_kcell_operators(provider, operators)
 
     offset = None
     last_check_ts = 0
@@ -313,6 +301,19 @@ def main():
                     chat_id=cfg.tg_chat_id,
                     message_thread_id=(cfg.tg_thread_id or None),
                 )
+
+            # "запущен" — один раз в день, когда смена реально началась,
+            # а не при каждом передеплое процесса
+            if in_shift and state.can_do_once_today("start_banner", updated_at):
+                tg.send_message(
+                    f"🚀 OperatorMonitor запущен (kcell)\n"
+                    f"{updated_at.strftime('%d.%m.%Y %H:%M')} ({cfg.tz})\n"
+                    f"Смена {cfg.work_start}-{cfg.work_end}, обед {cfg.lunch_start}-{cfg.lunch_end}",
+                    chat_id=cfg.tg_chat_id,
+                    message_thread_id=(cfg.tg_thread_id or None),
+                )
+                state.mark_done_today("start_banner", updated_at)
+                print(f"🚀 Смена началась, уведомление отправлено {updated_at.strftime('%H:%M:%S')}")
 
             # daily по факту окончания смены
             if last_in_shift and (not in_shift):

@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS daily_report (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     sent_day TEXT
 );
+
+CREATE TABLE IF NOT EXISTS daily_flags (
+    name TEXT PRIMARY KEY,
+    day TEXT
+);
 """
 
 
@@ -361,6 +366,23 @@ class StateStore:
     # =========================
     # DAILY
     # =========================
+    def can_do_once_today(self, name: str, now: datetime) -> bool:
+        """True, если событие `name` сегодня ещё не отмечалось. Переживает
+        рестарт — после передеплоя в середине дня повтора не будет."""
+        with self._lock:
+            cur = self._conn.execute("SELECT day FROM daily_flags WHERE name = ?", (str(name),))
+            row = cur.fetchone()
+        return (row["day"] if row else None) != now.date().isoformat()
+
+    def mark_done_today(self, name: str, now: datetime):
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO daily_flags (name, day) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET day = excluded.day",
+                (str(name), now.date().isoformat()),
+            )
+            self._conn.commit()
+
     def can_send_daily_report(self, now: datetime) -> bool:
         with self._lock:
             cur = self._conn.execute("SELECT sent_day FROM daily_report WHERE id = 1")
