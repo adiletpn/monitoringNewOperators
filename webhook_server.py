@@ -159,6 +159,11 @@ class LiveCallTracker:
         self.unknown_payloads = 0
         self.unknown_operators = 0
         self.handled = 0
+        # Сколько событий пришло от каждой АТС и когда последнее. Нужно, чтобы
+        # снаружи можно было доказать, что интеграция реально доставляет
+        # события, не читая логи и не дожидаясь звонка своего оператора.
+        self.seen_by_source: Dict[str, int] = {}
+        self.last_seen_by_source: Dict[str, str] = {}
 
     def resolve_operator(self, raw: str) -> str:
         return self.index.get(str(raw or "").strip().lower(), "")
@@ -176,6 +181,11 @@ class LiveCallTracker:
                     f"{json.dumps(payload, ensure_ascii=False)[:400]}"
                 )
             return "ignored"
+
+        from datetime import datetime as _dt
+        src = info.get("source") or self.source
+        self.seen_by_source[src] = self.seen_by_source.get(src, 0) + 1
+        self.last_seen_by_source[src] = _dt.now(self.tz).strftime("%H:%M:%S")
 
         if info["kind"] == "ignore":
             return "ignored"
@@ -282,6 +292,20 @@ def make_handler(tracker: LiveCallTracker, crm_token: str, ttl_seconds: int):
 
             # «Кто сейчас на линии» — чтобы второй бот мог забрать то же
             # состояние, если кабинет разрешает только один адрес CRM.
+            if path == "/stats":
+                if not self._token_ok({}, query):
+                    return self._reply(403, "forbidden")
+                live = tracker.state.get_live_calls(datetime.now(tracker.tz), ttl_seconds)
+                body = json.dumps({
+                    "events_by_pbx": tracker.seen_by_source,
+                    "last_event_at": tracker.last_seen_by_source,
+                    "calls_started": tracker.handled,
+                    "foreign_operators_skipped": tracker.unknown_operators,
+                    "unrecognized_payloads": tracker.unknown_payloads,
+                    "on_the_line_now": sorted(live),
+                }, ensure_ascii=False)
+                return self._reply(200, body, "application/json")
+
             if path == "/live":
                 if not self._token_ok({}, query):
                     return self._reply(403, "forbidden")

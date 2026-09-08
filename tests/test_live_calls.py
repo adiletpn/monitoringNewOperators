@@ -400,3 +400,23 @@ def test_both_pbxs_can_post_to_the_same_receiver():
 
     tracker.handle({"event": "2", "call_id": "s1", "short_src_num": "97"})
     assert state.get_live_calls(datetime.now(TZ)) == {}
+
+
+# ---------------- счётчик доставки по каждой АТС ----------------
+
+def test_counters_prove_delivery_even_for_foreign_and_ignored_events():
+    """Событие чужого оператора и «инициирование вызова» действий не требуют,
+    но доказывают, что интеграция доставляет — их тоже считаем."""
+    state = StateStore(":memory:")
+    ops = {"Балнур": {"id": "balnur", "sipuni": {"ext": "97"},
+                      "kcell": {"login": "balnur", "extension": "702"}}}
+    tracker = LiveCallTracker(state, ops, TZ)
+
+    tracker.handle({"event": "1", "call_id": "s0", "short_dst_num": "97"})     # инициирование
+    tracker.handle({"event": "3", "call_id": "s1", "short_dst_num": "208"})    # чужой
+    tracker.handle({"event": "3", "call_id": "s2", "short_dst_num": "97"})     # наш
+    tracker.handle({"cmd": "event", "callid": "k1", "status": "ACCEPTED", "from": "702"})
+
+    assert tracker.seen_by_source == {"sipuni": 3, "kcell": 1}
+    assert set(tracker.last_seen_by_source) == {"sipuni", "kcell"}
+    assert tracker.unknown_operators == 1
