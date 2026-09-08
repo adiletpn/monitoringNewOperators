@@ -252,3 +252,70 @@ def test_pending_is_per_day():
     state.mark_threshold_pending("1", dt(11, 15), 15)
     tomorrow = dt(11, 15) + timedelta(days=1)
     assert state.get_pending_thresholds("1", tomorrow) == {}
+
+
+# ---------------- реальный формат событий Kcell ----------------
+# Конверт подтверждён работающей интеграцией соседнего проекта на этой же АТС:
+#   cmd=event, callid, status=ACCEPTED|CANCELLED, from=<внутренний номер>,
+#   to=<клиент>, duration=<секунды> только в финальном событии.
+
+def test_kcell_accepted_without_duration_means_talking_now():
+    info = classify_event({"cmd": "event", "callid": "77", "status": "ACCEPTED",
+                           "from": "704", "to": "77012345678"})
+    assert info["kind"] == "start"
+    assert info["call_id"] == "77"
+
+
+def test_kcell_final_event_ends_the_call_even_though_status_is_accepted():
+    """Ловушка: финальное событие тоже ACCEPTED. Отличает его duration —
+    иначе человек навсегда завис бы «на линии»."""
+    info = classify_event({"cmd": "event", "callid": "77", "status": "ACCEPTED",
+                           "from": "704", "to": "77012345678", "duration": "930"})
+    assert info["kind"] == "end"
+
+
+def test_kcell_zero_duration_is_also_final():
+    info = classify_event({"cmd": "event", "callid": "78", "status": "CANCELLED",
+                           "from": "704", "to": "77012345678", "duration": "0"})
+    assert info["kind"] == "end"
+
+
+def test_kcell_cancelled_without_duration_ends_the_call():
+    info = classify_event({"cmd": "event", "callid": "79", "status": "CANCELLED",
+                           "from": "704", "to": "77012345678"})
+    assert info["kind"] == "end"
+
+
+def test_operator_is_found_by_kcell_internal_number():
+    """Событие приходит про номер (from=702), а не про логин — в operators.yml
+    он лежит под ключом extension."""
+    ops = {"Балнур": {"id": "balnur", "kcell": {"login": "balnur", "extension": "702"}}}
+    assert build_operator_index(ops)["702"] == "balnur"
+
+
+def test_incoming_call_finds_the_operator_in_the_to_field():
+    """У входящего from — это клиент, а менеджер лежит в to."""
+    state = StateStore(":memory:")
+    ops = {"Дина": {"id": "dina", "kcell": {"login": "dina", "extension": "704"}}}
+    tracker = LiveCallTracker(state, ops, TZ)
+    assert tracker.handle({"cmd": "event", "callid": "c9", "status": "ACCEPTED",
+                           "from": "77012345678", "to": "704"}) == "start"
+    assert set(state.get_live_calls(datetime.now(TZ))) == {"dina"}
+
+
+def test_full_kcell_call_cycle_marks_and_clears_the_line():
+    state = StateStore(":memory:")
+    ops = {"Дина": {"id": "dina", "kcell": {"login": "dina", "extension": "704"}}}
+    tracker = LiveCallTracker(state, ops, TZ)
+
+    tracker.handle({"cmd": "event", "callid": "c1", "status": "ACCEPTED", "from": "704", "to": "7701"})
+    assert set(state.get_live_calls(datetime.now(TZ))) == {"dina"}
+
+    tracker.handle({"cmd": "event", "callid": "c1", "status": "ACCEPTED",
+                    "from": "704", "to": "7701", "duration": "960"})
+    assert state.get_live_calls(datetime.now(TZ)) == {}
+
+
+def test_history_command_is_not_treated_as_a_call_event():
+    assert classify_event({"cmd": "history", "callid": "c1", "status": "ACCEPTED",
+                           "duration": "12", "from": "704"}) is None

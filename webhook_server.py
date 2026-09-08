@@ -69,6 +69,15 @@ def classify_event(payload: dict) -> Optional[dict]:
 
     None означает «это не событие о звонке» (contact/rating/history или мусор) —
     такие тихо игнорируем, чтобы не ломать мониторинг на неожиданной команде.
+
+    Формат Kcell (проверен в бою соседним проектом на этой же АТС):
+        cmd=event, callid=<id>, status=ACCEPTED|CANCELLED,
+        from=<внутренний номер менеджера>, to=<номер клиента>,
+        duration=<секунды> — приходит ТОЛЬКО в финальном событии.
+
+    Отсюда главное правило: разговор закончился не по названию статуса, а по
+    появлению duration. Финальное событие тоже имеет status=ACCEPTED, и если
+    смотреть только на статус, человек навсегда останется «на линии».
     """
     flat = _flatten(payload)
 
@@ -77,10 +86,14 @@ def classify_event(payload: dict) -> Optional[dict]:
         return None
 
     raw_event = _pick(flat, _EVENT_KEYS).upper()
-    if raw_event in START_EVENTS:
-        kind = "start"
+    has_duration = str(flat.get("duration", "")).strip() != ""
+
+    if has_duration:
+        kind = "end"                      # итог звонка окончателен
     elif raw_event in END_EVENTS:
         kind = "end"
+    elif raw_event in START_EVENTS:
+        kind = "start"                    # трубку сняли, разговор идёт
     else:
         return None
 
@@ -103,7 +116,10 @@ def build_operator_index(operators: Dict[str, Dict]) -> Dict[str, str]:
             continue
         kcell = meta.get("kcell") or {}
         sipuni = meta.get("sipuni") or {}
-        for key in (op_id, kcell.get("login"), kcell.get("ext"), sipuni.get("ext")):
+        # В operators.yml внутренний номер Kcell лежит под ключом "extension",
+        # а событие приходит именно про номер (from=702), не про логин.
+        for key in (op_id, kcell.get("login"), kcell.get("extension"),
+                    kcell.get("ext"), sipuni.get("ext")):
             key = str(key or "").strip().lower()
             if key:
                 index.setdefault(key, op_id)
