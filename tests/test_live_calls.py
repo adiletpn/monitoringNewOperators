@@ -319,3 +319,84 @@ def test_full_kcell_call_cycle_marks_and_clears_the_line():
 def test_history_command_is_not_treated_as_a_call_event():
     assert classify_event({"cmd": "history", "callid": "c1", "status": "ACCEPTED",
                            "duration": "12", "from": "704"}) is None
+
+
+# ---------------- формат событий Sipuni ----------------
+# Настройки → API → События АТС. Событие приходит номером, а не словом:
+#   1 — вызов инициирован, 2 — завершение, 3 — на вызов ответили,
+#   4 — промежуточное завершение при переводе.
+
+def test_sipuni_answer_starts_the_call():
+    info = classify_event({"event": "3", "call_id": "s1", "short_dst_num": "97",
+                           "src_num": "77012345678", "dst_num": "77475567651"})
+    assert info["kind"] == "start"
+    assert info["source"] == "sipuni"
+    assert info["call_id"] == "s1"
+
+
+def test_sipuni_hangup_ends_the_call():
+    assert classify_event({"event": "2", "call_id": "s1", "status": "ANSWER",
+                           "short_src_num": "97"})["kind"] == "end"
+    assert classify_event({"event": "4", "call_id": "s1", "short_src_num": "97"})["kind"] == "end"
+
+
+def test_sipuni_call_initiation_alone_does_not_mark_anyone_busy():
+    """event=1 приходит и на входящий, звонящий во весь отдел — оператор им
+    ещё не занят, иначе пометили бы «на линии» всех подряд."""
+    assert classify_event({"event": "1", "call_id": "s1", "short_dst_num": "97"})["kind"] == "ignore"
+
+
+def test_initiation_event_is_quiet_and_changes_nothing():
+    state = StateStore(":memory:")
+    ops = {"Балнур": {"id": "balnur", "sipuni": {"ext": "97"}}}
+    tracker = LiveCallTracker(state, ops, TZ)
+    assert tracker.handle({"event": "1", "call_id": "s1", "short_dst_num": "97"}) == "ignored"
+    assert state.get_live_calls(datetime.now(TZ)) == {}
+    assert tracker.unknown_payloads == 0        # это не мусор, в лог не сыплем
+
+
+def test_foreign_operators_do_not_pollute_the_state():
+    """Sipuni шлёт события по всему аккаунту — чужие звонки просто игнорируем."""
+    state = StateStore(":memory:")
+    ops = {"Балнур": {"id": "balnur", "sipuni": {"ext": "97"}}}
+    tracker = LiveCallTracker(state, ops, TZ)
+    assert tracker.handle({"event": "3", "call_id": "x", "short_dst_num": "208"}) == "unknown-operator"
+    assert state.get_live_calls(datetime.now(TZ)) == {}
+
+
+def test_sipuni_operator_matched_by_internal_number_not_the_full_one():
+    """У Балнур внутренний 97, а полный номер линии — 77475567651.
+    Искать надо именно внутренний."""
+    state = StateStore(":memory:")
+    ops = {"Балнур": {"id": "balnur", "kcell": {"login": "balnur", "extension": "702"},
+                      "sipuni": {"ext": "97"}}}
+    tracker = LiveCallTracker(state, ops, TZ)
+
+    assert tracker.handle({"event": "3", "call_id": "s1", "src_num": "77012345678",
+                           "dst_num": "77475567651", "short_dst_num": "97"}) == "start"
+    assert set(state.get_live_calls(datetime.now(TZ))) == {"balnur"}
+
+    assert tracker.handle({"event": "2", "call_id": "s1", "short_dst_num": "97"}) == "end"
+    assert state.get_live_calls(datetime.now(TZ)) == {}
+
+
+def test_both_pbxs_can_post_to_the_same_receiver():
+    """Обе АТС шлют на один адрес — форматы не должны мешать друг другу."""
+    state = StateStore(":memory:")
+    ops = {
+        "Дина": {"id": "dina", "kcell": {"login": "dina", "extension": "704"}},
+        "Балнур": {"id": "balnur", "kcell": {"login": "balnur", "extension": "702"},
+                   "sipuni": {"ext": "97"}},
+    }
+    tracker = LiveCallTracker(state, ops, TZ)
+
+    tracker.handle({"cmd": "event", "callid": "k1", "status": "ACCEPTED", "from": "704", "to": "7701"})
+    tracker.handle({"event": "3", "call_id": "s1", "short_src_num": "97", "dst_num": "7701"})
+    assert set(state.get_live_calls(datetime.now(TZ))) == {"dina", "balnur"}
+
+    tracker.handle({"cmd": "event", "callid": "k1", "status": "ACCEPTED",
+                    "from": "704", "to": "7701", "duration": "930"})
+    assert set(state.get_live_calls(datetime.now(TZ))) == {"balnur"}
+
+    tracker.handle({"event": "2", "call_id": "s1", "short_src_num": "97"})
+    assert state.get_live_calls(datetime.now(TZ)) == {}

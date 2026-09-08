@@ -31,8 +31,16 @@ _CALL_ID_KEYS = ("call_id", "callid", "uid", "id", "pbx_call_id", "call_uid", "s
 _EVENT_KEYS = ("type", "event", "status", "state", "call_state", "event_type")
 _OPERATOR_KEYS = (
     "user", "login", "ext", "extension", "employee", "operator",
-    "user_login", "user_ext", "internal", "src_num", "dst_num", "from", "to",
+    "user_login", "user_ext", "internal",
+    # Sipuni: short_* — внутренний номер (97, 240), src_num/dst_num — полный
+    "short_src_num", "short_dst_num", "src_num", "dst_num", "from", "to",
 )
+
+# Sipuni нумерует события: 1 — вызов инициирован, 2 — завершение,
+# 3 — на вызов ответили, 4 — промежуточное завершение при переводе.
+# «На линии» считаем только с момента ОТВЕТА: событие 1 приходит и на
+# входящий на весь отдел, там оператор ещё никем не занят.
+_SIPUNI_KIND = {"2": "end", "3": "start", "4": "end"}
 
 
 def _flatten(payload: dict) -> Dict[str, str]:
@@ -65,19 +73,19 @@ def _pick(flat: Dict[str, str], keys) -> str:
 
 
 def classify_event(payload: dict) -> Optional[dict]:
-    """payload -> {'call_id', 'event', 'kind': 'start'|'end', 'operator'} или None.
+    """payload -> {'call_id', 'event', 'kind': 'start'|'end', 'operator', 'source'}
+    или None, если это не событие о звонке (такие тихо игнорируем).
 
-    None означает «это не событие о звонке» (contact/rating/history или мусор) —
-    такие тихо игнорируем, чтобы не ломать мониторинг на неожиданной команде.
+    Понимает два разных формата, потому что обе АТС шлют на один адрес.
 
-    Формат Kcell (проверен в бою соседним проектом на этой же АТС):
-        cmd=event, callid=<id>, status=ACCEPTED|CANCELLED,
-        from=<внутренний номер менеджера>, to=<номер клиента>,
-        duration=<секунды> — приходит ТОЛЬКО в финальном событии.
+    Kcell: cmd=event, callid, status=ACCEPTED|CANCELLED, from=<внутренний
+    номер>, to=<клиент>, duration=<секунды> только в финальном событии.
+    Разговор закончился не по названию статуса, а по появлению duration —
+    финальное событие тоже ACCEPTED, и по статусу человек навсегда остался бы
+    «на линии».
 
-    Отсюда главное правило: разговор закончился не по названию статуса, а по
-    появлению duration. Финальное событие тоже имеет status=ACCEPTED, и если
-    смотреть только на статус, человек навсегда останется «на линии».
+    Sipuni: event=1|2|3|4 числом, call_id, short_src_num / short_dst_num —
+    внутренние номера. Началом разговора считаем только событие 3 (ответ).
     """
     flat = _flatten(payload)
 
@@ -86,22 +94,36 @@ def classify_event(payload: dict) -> Optional[dict]:
         return None
 
     raw_event = _pick(flat, _EVENT_KEYS).upper()
-    has_duration = str(flat.get("duration", "")).strip() != ""
+    source = ""
 
-    if has_duration:
-        kind = "end"                      # итог звонка окончателен
-    elif raw_event in END_EVENTS:
-        kind = "end"
-    elif raw_event in START_EVENTS:
-        kind = "start"                    # трубку сняли, разговор идёт
+    # ---- Sipuni: номер события вместо названия ----
+    sip_event = str(flat.get("event", "")).strip()
+    if sip_event in ("1", "2", "3", "4"):
+        # 1 — только инициирование вызова: известное событие, но действовать
+        # по нему нельзя. Возвращаем как "ignore", чтобы не считать мусором и
+        # не сыпать в лог — Sipuni шлёт его на каждый звонок аккаунта.
+        kind = _SIPUNI_KIND.get(sip_event, "ignore")
+        source = "sipuni"
+        raw_event = f"SIPUNI-{sip_event}"
     else:
-        return None
+        # ---- Kcell: словесный статус + duration ----
+        has_duration = str(flat.get("duration", "")).strip() != ""
+        if has_duration:
+            kind = "end"                  # итог звонка окончателен
+        elif raw_event in END_EVENTS:
+            kind = "end"
+        elif raw_event in START_EVENTS:
+            kind = "start"                # трубку сняли, разговор идёт
+        else:
+            return None
+        source = "kcell"
 
     return {
         "call_id": _pick(flat, _CALL_ID_KEYS),
         "event": raw_event,
         "kind": kind,
         "operator": _pick(flat, _OPERATOR_KEYS),
+        "source": source,
         "flat": flat,
     }
 
@@ -147,7 +169,15 @@ class LiveCallTracker:
         info = classify_event(payload)
         if not info:
             self.unknown_payloads += 1
-            print(f"[WEBHOOK] не событие о звонке, пропускаю: {json.dumps(payload, ensure_ascii=False)[:500]}")
+            # Незнакомый формат стоит увидеть, но не тысячу раз подряд.
+            if self.unknown_payloads <= 5 or self.unknown_payloads % 500 == 0:
+                print(
+                    f"[WEBHOOK] не событие о звонке (#{self.unknown_payloads}): "
+                    f"{json.dumps(payload, ensure_ascii=False)[:400]}"
+                )
+            return "ignored"
+
+        if info["kind"] == "ignore":
             return "ignored"
 
         op_id = self.resolve_operator(info["operator"])
@@ -159,20 +189,24 @@ class LiveCallTracker:
                     break
 
         if not op_id:
+            # Sipuni шлёт события по всему аккаунту — чужих операторов там
+            # десятки, и это норма, а не ошибка. Логируем изредка, чтобы
+            # заметить настоящую проблему сопоставления и не залить лог.
             self.unknown_operators += 1
-            print(
-                f"[WEBHOOK] {info['event']}: не понял, чей это звонок "
-                f"(искал по {info['operator']!r}). Payload: "
-                f"{json.dumps(payload, ensure_ascii=False)[:500]}"
-            )
+            if self.unknown_operators <= 5 or self.unknown_operators % 500 == 0:
+                print(
+                    f"[WEBHOOK] {info['event']}: звонок не нашего оператора "
+                    f"(#{self.unknown_operators}, искал по {info['operator']!r})"
+                )
             return "unknown-operator"
 
         now = datetime.now(self.tz)
         call_id = info["call_id"] or f"{op_id}-{now.strftime('%Y%m%d%H%M%S')}"
         self.handled += 1
 
+        source = info.get("source") or self.source
         if info["kind"] == "start":
-            self.state.start_live_call(op_id, call_id, now, info["event"], self.source)
+            self.state.start_live_call(op_id, call_id, now, info["event"], source)
             print(f"[WEBHOOK] {info['event']}: {op_id} на линии (звонок {call_id})")
             return "start"
 
@@ -239,7 +273,11 @@ def make_handler(tracker: LiveCallTracker, crm_token: str, ttl_seconds: int):
             query = urllib.parse.parse_qs(parsed.query)
             path = parsed.path.rstrip("/") or "/"
 
-            if path in ("/", "/health"):
+            # Railway пингует "/" без параметров. Событие, пришедшее сюда же
+            # методом GET, отличаем по наличию ключа — иначе оно потерялось бы,
+            # молча приняв вид healthcheck.
+            has_token = bool(query.get("token") or query.get("crm_token"))
+            if path in ("/", "/health") and not has_token:
                 return self._reply(200, "ok")
 
             # «Кто сейчас на линии» — чтобы второй бот мог забрать то же
@@ -253,7 +291,15 @@ def make_handler(tracker: LiveCallTracker, crm_token: str, ttl_seconds: int):
                 )
                 return self._reply(200, body, "application/json")
 
-            return self._reply(404, "not found")
+            # Sipuni умеет слать события и через GET — всё, что не health и
+            # не live, разбираем как событие о звонке.
+            if not self._token_ok({}, query):
+                return self._reply(404, "not found")
+            try:
+                tracker.handle({k: v[0] if len(v) == 1 else v for k, v in query.items()})
+            except Exception as e:
+                print(f"[WEBHOOK] ошибка обработки GET-события: {e}")
+            return self._reply(200, '{"success": true, "ok": true}', "application/json")
 
         def do_POST(self):
             try:
@@ -276,7 +322,9 @@ def make_handler(tracker: LiveCallTracker, crm_token: str, ttl_seconds: int):
                 # событие не должно ронять приёмник — мониторинг важнее
                 print(f"[WEBHOOK] ошибка обработки: {e}")
 
-            return self._reply(200, "ok")
+            # Sipuni считает доставку успешной только при JSON с success,
+            # Kcell устраивает любой 200 — отвечаем так, чтобы годилось обоим.
+            return self._reply(200, '{"success": true, "ok": true}', "application/json")
 
     return Handler
 
