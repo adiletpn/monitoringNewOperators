@@ -38,6 +38,8 @@ operators:
     login: mariya
     extension: '705'
     role: user
+  sipuni:
+    ext: '236'         # внутренний номер в Sipuni — звонит и оттуда, и из Kcell
 
 - name: Наталья
   op_id: natalya
