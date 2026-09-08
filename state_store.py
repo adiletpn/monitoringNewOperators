@@ -40,6 +40,23 @@ CREATE TABLE IF NOT EXISTS daily_report (
     sent_day TEXT
 );
 
+CREATE TABLE IF NOT EXISTS live_calls (
+    call_id TEXT PRIMARY KEY,
+    op_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    event TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS pending_alerts (
+    op_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    since TEXT NOT NULL,
+    PRIMARY KEY (op_id, day, threshold)
+);
+
 CREATE TABLE IF NOT EXISTS daily_flags (
     name TEXT PRIMARY KEY,
     day TEXT
@@ -49,6 +66,15 @@ CREATE TABLE IF NOT EXISTS daily_flags (
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
+
+
+def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
 
 def _parse_int_set(s: str) -> Set[int]:
@@ -366,6 +392,114 @@ class StateStore:
     # =========================
     # DAILY
     # =========================
+    # ---------------- ИДУЩИЕ ПРЯМО СЕЙЧАС ЗВОНКИ ----------------
+    # История АТС отдаёт только завершённые разговоры, поэтому «кто сейчас на
+    # линии» знаем исключительно из событий вебхука.
+    def start_live_call(self, op_id: str, call_id: str, now: datetime, event: str = "", source: str = ""):
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT started_at FROM live_calls WHERE call_id = ?", (str(call_id),)
+            )
+            row = cur.fetchone()
+            # ACCEPTED приходит после OUTGOING по тому же звонку — начало не сдвигаем
+            started = row["started_at"] if row else _iso(now)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO live_calls (call_id, op_id, started_at, updated_at, event, source)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (str(call_id), str(op_id), started, _iso(now), str(event or ""), str(source or "")),
+            )
+            self._conn.commit()
+
+    def end_live_call(self, call_id: str, op_id: str = ""):
+        with self._lock:
+            self._conn.execute("DELETE FROM live_calls WHERE call_id = ?", (str(call_id),))
+            self._conn.commit()
+
+    def get_live_calls(self, now: datetime, ttl_seconds: int = 7200) -> dict:
+        """op_id -> момент начала самого раннего идущего звонка.
+
+        Заодно чистит зависшие: если COMPLETED потерялся (моргнула сеть, ВАТС
+        не доставила), человек не должен навсегда остаться «разговаривающим» и
+        выпасть из мониторинга.
+        """
+        with self._lock:
+            cur = self._conn.execute("SELECT call_id, op_id, started_at FROM live_calls")
+            rows = cur.fetchall()
+
+        out, stale = {}, []
+        for r in rows:
+            started = _parse_iso(r["started_at"])
+            if not started:
+                stale.append(r["call_id"])
+                continue
+            if (now - started).total_seconds() > max(60, int(ttl_seconds)):
+                stale.append(r["call_id"])
+                continue
+            op = str(r["op_id"])
+            if op not in out or started < out[op]:
+                out[op] = started
+
+        if stale:
+            with self._lock:
+                self._conn.executemany(
+                    "DELETE FROM live_calls WHERE call_id = ?", [(c,) for c in stale]
+                )
+                self._conn.commit()
+            print(f"[LIVE] снял зависшие звонки без завершения: {len(stale)}")
+
+        return out
+
+    def get_live_call_ids(self) -> set:
+        with self._lock:
+            cur = self._conn.execute("SELECT call_id FROM live_calls")
+            return {str(r["call_id"]) for r in cur.fetchall()}
+
+    def replace_live_calls(self, mapping: dict, now: datetime, source: str = "peer"):
+        """Полностью заменяет список идущих звонков (для второго бота, который
+        забирает состояние у первого, а не принимает события сам)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM live_calls WHERE source = ?", (source,))
+            for op_id, started in mapping.items():
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO live_calls (call_id, op_id, started_at, updated_at, event, source)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (f"{source}:{op_id}", str(op_id), _iso(started), _iso(now), "MIRROR", source),
+                )
+            self._conn.commit()
+
+    # ---------------- ОТЛОЖЕННЫЕ АЛЕРТЫ ----------------
+    def mark_threshold_pending(self, op_id: str, now: datetime, threshold_min: int):
+        """Порог достигнут, но алерт пока придерживаем — вдруг человек прямо
+        сейчас разговаривает, и звонок просто ещё не попал в историю."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO pending_alerts (op_id, day, threshold, since) VALUES (?, ?, ?, ?)",
+                (str(op_id), now.date().isoformat(), int(threshold_min), _iso(now)),
+            )
+            self._conn.commit()
+
+    def get_pending_thresholds(self, op_id: str, now: datetime) -> dict:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT threshold, since FROM pending_alerts WHERE op_id = ? AND day = ?",
+                (str(op_id), now.date().isoformat()),
+            )
+            rows = cur.fetchall()
+        out = {}
+        for r in rows:
+            ts = _parse_iso(r["since"])
+            if ts:
+                out[int(r["threshold"])] = ts
+        return out
+
+    def clear_pending_threshold(self, op_id: str, now: datetime, threshold_min: int):
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM pending_alerts WHERE op_id = ? AND day = ? AND threshold = ?",
+                (str(op_id), now.date().isoformat(), int(threshold_min)),
+            )
+            self._conn.commit()
+
     def can_do_once_today(self, name: str, now: datetime) -> bool:
         """True, если событие `name` сегодня ещё не отмечалось. Переживает
         рестарт — после передеплоя в середине дня повтора не будет."""

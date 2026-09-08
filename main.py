@@ -7,6 +7,7 @@ from state_store import StateStore
 from monitor import MonitorService
 from telegram_client import TelegramClient
 from providers import get_provider
+from webhook_server import LiveCallTracker, pull_peer_live_calls, start_webhook_server
 from operators_loader import load_operators_yaml, load_project_rops
 
 
@@ -96,6 +97,14 @@ def main():
     project_rops = load_project_rops(cfg.kcell_operators_yml)
     provider = get_provider(cfg, operators)
     monitor = MonitorService(cfg, operators, state, provider, project_rops)
+
+    # Реалтайм: ВАТС сама шлёт события о звонках, поэтому идущий прямо сейчас
+    # разговор виден сразу, а не только после завершения. Без этого длинный
+    # звонок выглядел как молчание и ловил ложный алерт неактивности.
+    live_tracker = LiveCallTracker(state, operators, tz)
+    start_webhook_server(cfg, live_tracker)
+    if cfg.live_calls_url:
+        print(f"[LIVE] состояние линий беру у соседнего бота: {cfg.live_calls_url}")
 
     tg.set_my_commands([
         {"command": "status", "description": "Статус операторов"},
@@ -280,6 +289,10 @@ def main():
         # Periodic check
         # =================
         if time.time() - last_check_ts >= cfg.check_every_seconds:
+            # второй бот забирает «кто сейчас на линии» у первого: адрес CRM в
+            # кабинете один, а алерты в обоих чатах должны совпадать
+            pull_peer_live_calls(cfg, state, tz)
+
             last_check_ts = time.time()
 
             snapshot, updated_at, in_shift, in_break, err = monitor.build_snapshot()
@@ -373,21 +386,41 @@ def main():
                         state.on_operator_active(s.op_id, updated_at, s.last_call_time)
 
                 # (B) Алерты: только если INACTIVE, не absent и не активен WA
+                due = []
                 if (not absent_flag) and (not s.wa_active) and s.category == "INACTIVE":
                     due = state.get_due_thresholds(
                         s.op_id, updated_at,
                         s.current_inactive_seconds,
                         cfg.thresholds_minutes,
                     )
-                    for thr in due:
-                        text = monitor.format_inactive_alert(s, thr)
-                        msg_id = tg.send_message(
-                            text,
-                            chat_id=cfg.tg_alert_chat_id,
-                            message_thread_id=(cfg.tg_alert_thread_id or None),
-                            reply_markup=tg.keyboard_inactive(s.op_id),
-                        )
-                        state.register_alert_sent(s.op_id, updated_at, thr, msg_id)
+
+                # Порог не шлём в ту же секунду, когда он достигнут: если человек
+                # сейчас на длинном звонке, запись о разговоре появится в истории
+                # только после его завершения. Придерживаем алерт и перепроверяем —
+                # подтвердилась активность, значит отменяем молча.
+                pending = state.get_pending_thresholds(s.op_id, updated_at)
+                for thr in list(pending):
+                    if thr not in due:
+                        state.clear_pending_threshold(s.op_id, updated_at, thr)
+                        print(f"[ALERT] {s.name}: порог {thr}м снят до отправки — активность подтвердилась")
+
+                for thr in due:
+                    since = pending.get(thr)
+                    if since is None:
+                        state.mark_threshold_pending(s.op_id, updated_at, thr)
+                        since = updated_at
+                    if (updated_at - since).total_seconds() < cfg.alert_confirm_seconds:
+                        continue
+
+                    text = monitor.format_inactive_alert(s, thr)
+                    msg_id = tg.send_message(
+                        text,
+                        chat_id=cfg.tg_alert_chat_id,
+                        message_thread_id=(cfg.tg_alert_thread_id or None),
+                        reply_markup=tg.keyboard_inactive(s.op_id),
+                    )
+                    state.register_alert_sent(s.op_id, updated_at, thr, msg_id)
+                    state.clear_pending_threshold(s.op_id, updated_at, thr)
 
         time.sleep(1)
 

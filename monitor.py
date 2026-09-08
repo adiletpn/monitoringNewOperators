@@ -26,6 +26,7 @@ class OperatorStatus:
     from_number: Optional[str]
     to_number: Optional[str]
     wa_active: bool = False
+    on_call: bool = False   # прямо сейчас разговаривает (событие от ВАТС)
     source: str = ""   # "kcell" | "sipuni"
 
 
@@ -215,6 +216,21 @@ class MonitorService:
         if not records and err:
             return [], now, in_shift_now, break_now, err
 
+        # Кто прямо сейчас на линии — знаем только из событий ВАТС: в истории
+        # идущего звонка ещё нет. Без этого длинный разговор выглядел как
+        # молчание и ловил ложный алерт.
+        ttl = int(getattr(self.cfg, "live_call_ttl_minutes", 120) or 120) * 60
+        live_calls = self.state.get_live_calls(now, ttl)
+
+        # Звонок завершился и доехал до истории — снимаем пометку «на линии»,
+        # даже если событие COMPLETED потерялось по дороге.
+        live_ids = self.state.get_live_call_ids() if live_calls else set()
+        if live_ids:
+            for rec in records:
+                if rec.call_id and str(rec.call_id) in live_ids:
+                    self.state.end_live_call(rec.call_id)
+            live_calls = self.state.get_live_calls(now, ttl)
+
         by_operator: Dict[str, List[CallRecord]] = {}
         for rec in records:
             by_operator.setdefault(rec.operator_key, []).append(rec)
@@ -287,12 +303,25 @@ class MonitorService:
                 total = self._total_inactive_on_interval(segments, shift_start, wa_at_clipped, calls)
                 current = 0
 
+            # ===== идущий прямо сейчас звонок =====
+            # Разговор в процессе — это активность, а не молчание. Общую
+            # неактивность считаем до момента начала этого звонка: промежуток
+            # до него был настоящей паузой, а сам разговор — нет.
+            live_started = live_calls.get(op_id)
+            on_call = bool(live_started)
+            if live_started:
+                ls = self._clip_to_shift(today, live_started)
+                if ls > now_clipped:
+                    ls = now_clipped
+                total = self._total_inactive_on_interval(segments, shift_start, ls, calls)
+                current = 0
+
             if self.state.is_absent_today(op_id, now):
                 category = "ABSENT"
                 current = 0
                 total = 0
             else:
-                if wa_active:
+                if wa_active or on_call:
                     category = "ACTIVE"
                 else:
                     category = "ACTIVE" if (current // 60) < min_thr else "INACTIVE"
@@ -316,6 +345,7 @@ class MonitorService:
                     from_number=(last_record.from_number if last_record else None),
                     to_number=(last_record.to_number if last_record else None),
                     wa_active=wa_active,
+                    on_call=on_call,
                 )
             )
 
@@ -391,7 +421,7 @@ class MonitorService:
                 f"🗣 Суммарное время разговора: {s.total_talk_str}\n"
                 f"🕒 Первый звонок: {s.first_call_str}\n"
                 f"🕒 Последняя попытка: {s.last_call_str}\n"
-                f"🔘 Статус: {s.category}\n"
+                f"🔘 Статус: {s.category}" + (" 📞 на линии" if s.on_call else "") + "\n"
                 f"------------------------------"
             )
 
@@ -438,7 +468,7 @@ class MonitorService:
             f"🗣 Суммарное время разговора: {s.total_talk_str}\n"
             f"🕒 Первый звонок: {s.first_call_str}\n"
             f"🕒 Последняя попытка: {s.last_call_str}\n\n"
-            f"🔘 Статус: {s.category}"
+            f"🔘 Статус: {s.category}" + (" 📞 на линии" if s.on_call else "")
         )
 
     def format_absent_confirm(self, s: OperatorStatus) -> str:

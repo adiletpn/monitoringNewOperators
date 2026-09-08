@@ -47,7 +47,7 @@ class Config:
 
     tz: str = _clean(os.getenv("TZ", "Asia/Almaty"))
 
-    check_every_seconds: int = int(_clean(os.getenv("CHECK_EVERY_SECONDS", "300")) or "300")
+    check_every_seconds: int = int(_clean(os.getenv("CHECK_EVERY_SECONDS", "60")) or "60")
 
     thresholds_minutes: list[int] = field(
         default_factory=lambda: _parse_thresholds(os.getenv("THRESHOLDS_MINUTES", "15,30,60"))
@@ -97,6 +97,34 @@ class Config:
     # отчёт. Формат YYYY-MM-DD, пусто = работать сразу. Нужно, когда бота
     # выкатили заранее, а следить надо начать с конкретного дня.
     monitor_start_date: str = _clean(os.getenv("MONITOR_START_DATE", ""))
+
+    # Пауза перед отправкой алерта. АТС не показывает звонок, пока он идёт —
+    # запись появляется только после завершения. Поэтому долгий разговор
+    # выглядит как молчание, и на 15-й минуте прилетал ложный алерт.
+    # Достигнув порога, бот ждёт это время и перепроверяет: если звонок
+    # успел завершиться и появился в истории, алерт отменяется.
+    alert_confirm_seconds: int = int(_clean(os.getenv("ALERT_CONFIRM_SECONDS", "180")) or "180")
+
+    # ---- события о звонках в реальном времени (вебхук от ВАТС) ----
+    # Ключ из кабинета Kcell, поле «Ключ для авторизации». Пока он не задан,
+    # порт слушаем (Railway ждёт этого от web-процесса), но события отклоняем:
+    # открытый приёмник позволил бы кому угодно объявить оператора занятым.
+    crm_token: str = _clean(os.getenv("KCELL_CRM_TOKEN", ""))
+    # Railway сам подставляет PORT для web-процесса
+    webhook_port: int = int(_clean(os.getenv("PORT", "8080")) or "8080")
+    # Страховка от потерянного COMPLETED: через столько минут «разговаривает»
+    # снимается само, иначе человек навсегда выпал бы из мониторинга.
+    live_call_ttl_minutes: int = int(_clean(os.getenv("LIVE_CALL_TTL_MINUTES", "120")) or "120")
+
+    # Если кабинет разрешает только один адрес CRM, второй бот забирает
+    # «кто сейчас на линии» у первого: LIVE_CALLS_URL=https://<бот1>/live
+    live_calls_url: str = _clean(os.getenv("LIVE_CALLS_URL", ""))
+    live_calls_token: str = _clean(os.getenv("LIVE_CALLS_TOKEN", ""))
+
+    @property
+    def webhook_enabled(self) -> bool:
+        forced = _clean(os.getenv("WEBHOOK_ENABLED", "")).lower()
+        return forced not in ("0", "false", "no")
 
     @property
     def telephony_sources(self) -> list[str]:
