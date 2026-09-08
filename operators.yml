@@ -94,8 +94,8 @@ operators:
   monitored: true
   tg: '@gwrixk'
   sipuni:
-    ext: ''            # TODO: внутренний номер Карины в Sipuni — уточнить в кабинете
-    match: ['Карина']
+    ext: '240'         # внутренний номер Карины в Sipuni (из кабинета)
+    match: ['240', 'Карина']
 
 # проект -> @хендл РОПа (показывается в алерте)
 project_rops: {}
