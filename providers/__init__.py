@@ -54,18 +54,13 @@ def get_provider(cfg, operators: Dict[str, Dict]) -> TelephonyProvider:
     if len(names) == 1:
         return _BUILDERS[names[0]](cfg, operators)
 
-    by_source = split_operators_by_source(operators, default_source=names[0])
-    built = []
-    for n in names:
-        subset = by_source.get(n, {})
-        if not subset:
-            print(f"[PROVIDERS] в operators.yml нет операторов с source: {n} — источник не опрашиваю")
-            continue
-        built.append((n, _BUILDERS[n](cfg, subset)))
-        print(f"[PROVIDERS] {n}: {len(subset)} операторов ({', '.join(sorted(m['id'] for m in subset.values()))})")
-
-    if not built:
-        raise RuntimeError("Ни одного оператора не удалось привязать к источнику — проверь поле source в operators.yml")
-    if len(built) == 1:
-        return built[0][1]
+    # Один и тот же человек может звонить то через Kcell, то через Sipuni,
+    # поэтому каждому провайдеру отдаём ВЕСЬ список: Kcell найдёт своих по
+    # логину, Sipuni — своих по внутреннему номеру. У кого нужного блока в
+    # конфиге нет, тот в этом источнике просто не совпадёт ни с чем.
+    built = [(n, _BUILDERS[n](cfg, operators)) for n in names]
+    for n, _ in built:
+        who = [m["id"] for m in operators.values()
+               if (m.get("kcell", {}).get("login") if n == "kcell" else (m.get("sipuni", {}) or {}).get("ext"))]
+        print(f"[PROVIDERS] {n}: опознаваемых операторов {len(who)} ({', '.join(sorted(who))})")
     return CompositeProvider(built)

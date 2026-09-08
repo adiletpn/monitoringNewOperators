@@ -1,7 +1,9 @@
 # Состав под наблюдением. Поле source определяет, из какой АТС ждать звонки:
-#   kcell  — матчинг строгий, по логину (operator_key == login)
-#   sipuni — матчинг по внутреннему номеру внутри текста «Схема» выгрузки,
-#            поэтому обязателен блок sipuni.ext
+# Человек может звонить то через Kcell, то через Sipuni — у него могут быть
+# ОБА блока, и звонки из обеих АТС суммируются:
+#   kcell.login — матчинг по логину
+#   sipuni.ext  — матчинг по внутреннему номеру в тексте «Схема»
+# Нет блока — в этой АТС человек ни с чем не совпадёт.
 #
 # project + project_rops внизу — чтобы в алерте показывался РОП проекта.
 
@@ -9,7 +11,6 @@ operators:
 # ---------- Kcell ----------
 - name: Дина
   op_id: dina
-  source: kcell
   project: Яндекс такси КЗ
   monitored: true
   tg: '@DinaYandexGo'
@@ -20,7 +21,6 @@ operators:
 
 - name: Луиза
   op_id: luiza
-  source: kcell
   project: Яндекс такси КЗ
   monitored: true
   tg: 7 747 160 89 64
@@ -31,7 +31,6 @@ operators:
 
 - name: Мария
   op_id: mariya
-  source: kcell
   project: Яндекс такси КЗ
   monitored: true
   tg: '@nata_9987'
@@ -42,7 +41,6 @@ operators:
 
 - name: Наталья
   op_id: natalya
-  source: kcell
   project: Яндекс такси КЗ
   monitored: true
   tg: '@tasha04_04'
@@ -53,7 +51,6 @@ operators:
 
 - name: Асель
   op_id: aisha
-  source: kcell
   project: Яндекс такси КЗ
   monitored: true
   tg: 7 705 623 23 82
@@ -64,7 +61,6 @@ operators:
 
 - name: Ася
   op_id: anya
-  source: kcell
   project: Яндекс такси КЗ
   monitored: true
   tg: ''
@@ -79,23 +75,27 @@ operators:
 # человек будет вечно «неактивен».
 - name: Балнур
   op_id: balnur
-  source: sipuni
   project: ''
   monitored: true
   tg: ''
+  kcell:
+    login: balnur
+    extension: '702'
+    role: user
   sipuni:
     ext: '97'          # из схемы «Входящая 7475567651 Балнур 97»
-    match: ['97']
 
 - name: Карина
   op_id: karina
-  source: sipuni
   project: ''
   monitored: true
   tg: '@gwrixk'
+  kcell:
+    login: karina
+    extension: '711'
+    role: admin
   sipuni:
-    ext: '240'         # внутренний номер Карины в Sipuni (из кабинета)
-    match: ['240', 'Карина']
+    ext: '240'         # «240 Кариночкма карзиночка» в кабинете Sipuni
 
 # проект -> @хендл РОПа (показывается в алерте)
 project_rops: {}

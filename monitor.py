@@ -29,6 +29,16 @@ class OperatorStatus:
     source: str = ""   # "kcell" | "sipuni"
 
 
+def configured_sources(meta) -> str:
+    """Какие АТС в принципе могут дать звонки этому человеку."""
+    srcs = []
+    if (meta.get("kcell") or {}).get("login"):
+        srcs.append("kcell")
+    if (meta.get("sipuni") or {}).get("ext"):
+        srcs.append("sipuni")
+    return "+".join(srcs) or str(meta.get("source") or "")
+
+
 def fmt_hms(seconds: int) -> str:
     s = max(0, int(seconds or 0))
     h = s // 3600
@@ -242,6 +252,7 @@ class MonitorService:
 
             # суммарное время разговора за смену (сумма длительностей звонков)
             talk_total = sum(int(rec.duration_sec or 0) for _, _, rec in calls)
+            sources_used = "+".join(sorted({rec.source for _, _, rec in calls if rec.source}))
 
             # первый звонок фиксируется один раз за день и больше не меняется
             if first_start:
@@ -290,7 +301,7 @@ class MonitorService:
                 OperatorStatus(
                     name=name,
                     op_id=op_id,
-                    source=str(meta.get("source") or (last_record.source if last_record else "")),
+                    source=sources_used or configured_sources(meta),
                     category=category,
                     last_call_time=last_start,
                     current_inactive_seconds=current,
@@ -320,8 +331,9 @@ class MonitorService:
     @staticmethod
     def source_label(source: str) -> str:
         """Метка АТС для шапки алерта: часть операторов на Kcell, часть на Sipuni."""
-        s = (source or "").strip().lower()
-        return {"kcell": "Kcell", "sipuni": "Sipuni"}.get(s, s.title() if s else "")
+        names = {"kcell": "Kcell", "sipuni": "Sipuni"}
+        parts = [p for p in (source or "").strip().lower().split("+") if p]
+        return " + ".join(names.get(p, p.title()) for p in parts)
 
     def format_inactive_alert(self, s: OperatorStatus, threshold_min: int) -> str:
         thr = int(threshold_min)

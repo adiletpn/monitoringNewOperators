@@ -150,3 +150,42 @@ def test_sipuni_matches_by_name_when_ext_is_unknown():
     ops = {"Карина": {"id": "karina", "sipuni": {"ext": ""}, "match": ["Карина"]}}
     assert match("Входящая 7079263946 Карина 300", ops) == "Карина"
     assert match("исход +77078273726 nom 94", ops) is None
+
+
+# ---------- оператор может звонить через обе АТС ----------
+
+def test_calls_from_both_pbxs_are_summed_for_one_operator():
+    """Балнур звонит то через Kcell, то через Sipuni — считаем и то, и другое."""
+    c = CompositeProvider([
+        ("kcell", FakeProvider([rec("balnur", "kcell", 10, 30, dur=100)])),
+        ("sipuni", FakeProvider([rec("balnur", "sipuni", 11, 0, dur=200)])),
+    ])
+    records, err = c.fetch_calls(DAY)
+    assert err is None
+    mine = [r for r in records if r.operator_key == "balnur"]
+    assert len(mine) == 2
+    assert sum(r.duration_sec for r in mine) == 300
+    assert {r.source for r in mine} == {"kcell", "sipuni"}
+
+
+def test_source_label_renders_a_combination():
+    from monitor import MonitorService
+    assert MonitorService.source_label("kcell") == "Kcell"
+    assert MonitorService.source_label("sipuni") == "Sipuni"
+    assert MonitorService.source_label("kcell+sipuni") == "Kcell + Sipuni"
+    assert MonitorService.source_label("") == ""
+
+
+def test_configured_sources_lists_only_what_the_operator_actually_has():
+    from monitor import configured_sources
+    assert configured_sources({"kcell": {"login": "dina"}}) == "kcell"
+    assert configured_sources({"sipuni": {"ext": "97"}}) == "sipuni"
+    assert configured_sources({"kcell": {"login": "balnur"}, "sipuni": {"ext": "97"}}) == "kcell+sipuni"
+    assert configured_sources({}) == ""
+
+
+def test_operator_without_sipuni_block_never_matches_sipuni_rows():
+    """Тем, кого в Sipuni нет, чужие строки приписываться не должны."""
+    ops = {"Дина": {"id": "dina", "kcell": {"login": "dina"}, "sipuni": {}, "match": []}}
+    assert match("исход +77078273726 nom 94", ops) is None
+    assert match("Входящая 7475567651 Балнур 97", ops) is None
