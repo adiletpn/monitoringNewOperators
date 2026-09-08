@@ -26,6 +26,7 @@ class OperatorStatus:
     from_number: Optional[str]
     to_number: Optional[str]
     wa_active: bool = False
+    source: str = ""   # "kcell" | "sipuni"
 
 
 def fmt_hms(seconds: int) -> str:
@@ -289,6 +290,7 @@ class MonitorService:
                 OperatorStatus(
                     name=name,
                     op_id=op_id,
+                    source=str(meta.get("source") or (last_record.source if last_record else "")),
                     category=category,
                     last_call_time=last_start,
                     current_inactive_seconds=current,
@@ -315,6 +317,12 @@ class MonitorService:
                 return s
         return None
 
+    @staticmethod
+    def source_label(source: str) -> str:
+        """Метка АТС для шапки алерта: часть операторов на Kcell, часть на Sipuni."""
+        s = (source or "").strip().lower()
+        return {"kcell": "Kcell", "sipuni": "Sipuni"}.get(s, s.title() if s else "")
+
     def format_inactive_alert(self, s: OperatorStatus, threshold_min: int) -> str:
         thr = int(threshold_min)
         head = f"🚫 ОПЕРАТОР ОТСУТСТВУЕТ {thr} МИН" if thr >= 60 else f"⛔ ОПЕРАТОР НЕАКТИВЕН {thr} МИН"
@@ -326,7 +334,11 @@ class MonitorService:
         rop = self._rop_by_project(project)
         rop_line = f"👨‍💼 РОП: {rop}\n" if rop else ""
 
+        label = self.source_label(s.source)
+        src_line = f"📡 {label}\n" if label else ""
+
         return (
+            f"{src_line}"
             f"{head}\n\n"
             f"👤 {who}\n"
             f"{rop_line}"

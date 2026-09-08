@@ -238,6 +238,7 @@ class KcellProvider:
                     operator_name=str(row.get("user_name") or ""),
                     from_number=client if direction == "in" else diversion,
                     to_number=diversion if direction == "in" else client,
+                    source="kcell",
                     raw=row,
                 )
             )

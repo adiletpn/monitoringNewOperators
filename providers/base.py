@@ -17,6 +17,7 @@ class CallRecord:
     operator_name: str            # как АТС называет сотрудника
     from_number: str
     to_number: str
+    source: str = ""              # "kcell" | "sipuni" — из какой АТС пришёл звонок
     raw: dict = field(default_factory=dict, compare=False)  # исходный объект — для отладки
 
     @property

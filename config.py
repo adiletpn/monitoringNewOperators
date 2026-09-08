@@ -34,8 +34,13 @@ def _parse_thresholds(s: str) -> list[int]:
 class Config:
     telephony_provider: str = _clean(os.getenv("TELEPHONY_PROVIDER", "kcell")) or "kcell"
 
-    kcell_base_url: str = _req("KCELL_BASE_URL")
-    kcell_api_key: str = _req("KCELL_API_KEY")
+    # Sipuni — часть операторов звонит через неё
+    sipuni_user: str = _clean(os.getenv("SIPUNI_USER", ""))
+    sipuni_secret: str = _clean(os.getenv("SIPUNI_SECRET", ""))
+    sipuni_csv_tz: str = _clean(os.getenv("SIPUNI_CSV_TZ", ""))
+
+    kcell_base_url: str = _clean(os.getenv("KCELL_BASE_URL", ""))
+    kcell_api_key: str = _clean(os.getenv("KCELL_API_KEY", ""))
     kcell_tz: str = _clean(os.getenv("KCELL_TZ", "Asia/Almaty"))
     kcell_count_directions: str = _clean(os.getenv("KCELL_COUNT_DIRECTIONS", "out")) or "out"
     kcell_operators_yml: str = _clean(os.getenv("KCELL_OPERATORS_YML", "operators.yml")) or "operators.yml"
@@ -93,6 +98,24 @@ class Config:
     # выкатили заранее, а следить надо начать с конкретного дня.
     monitor_start_date: str = _clean(os.getenv("MONITOR_START_DATE", ""))
 
+    @property
+    def telephony_sources(self) -> list[str]:
+        """TELEPHONY_PROVIDER -> список источников: 'kcell', 'sipuni',
+        'both' или 'kcell,sipuni'."""
+        raw = (self.telephony_provider or "kcell").strip().lower()
+        if raw == "both":
+            return ["kcell", "sipuni"]
+        return [n.strip() for n in raw.replace("+", ",").split(",") if n.strip()]
+
     def __post_init__(self):
-        if self.telephony_provider != "kcell":
-            raise RuntimeError(f"Invalid TELEPHONY_PROVIDER: {self.telephony_provider!r} (expected 'kcell')")
+        sources = self.telephony_sources
+        unknown = [s for s in sources if s not in ("sipuni", "kcell")]
+        if unknown or not sources:
+            raise RuntimeError(
+                f"Invalid TELEPHONY_PROVIDER: {self.telephony_provider!r} "
+                f"(expected 'kcell', 'sipuni', 'both' or 'kcell,sipuni')"
+            )
+        if "sipuni" in sources and not (self.sipuni_user and self.sipuni_secret):
+            raise RuntimeError("TELEPHONY_PROVIDER включает sipuni — нужны SIPUNI_USER и SIPUNI_SECRET")
+        if "kcell" in sources and not (self.kcell_base_url and self.kcell_api_key):
+            raise RuntimeError("TELEPHONY_PROVIDER включает kcell — нужны KCELL_BASE_URL и KCELL_API_KEY")

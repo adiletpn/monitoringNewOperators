@@ -31,7 +31,11 @@ def load_operators_yaml(path: str = "operators.yml", include_unmonitored: bool =
             "tg": entry.get("tg", ""),
             "monitored": entry.get("monitored", True),
             "project": entry.get("project", ""),
+            "source": str(entry.get("source") or "").strip().lower(),
             "kcell": entry.get("kcell", {}) or {},
+            "sipuni": entry.get("sipuni", {}) or {},
+            "match": (entry.get("sipuni", {}) or {}).get("match")
+                     or ([str((entry.get("sipuni") or {})["ext"])] if (entry.get("sipuni") or {}).get("ext") else []),
         }
     return operators
 

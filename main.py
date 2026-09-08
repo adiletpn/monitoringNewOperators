@@ -23,6 +23,22 @@ def parse_start_date(cfg):
         return None
 
 
+def format_watched_operators(operators, monitor) -> str:
+    """Список тех, за кем реально следим, с разбивкой по АТС — уходит вместе
+    с сообщением о старте смены, чтобы сразу было видно состав."""
+    by_source = {}
+    for name, meta in operators.items():
+        by_source.setdefault(str(meta.get("source") or "").lower(), []).append(name)
+
+    lines = [f"👥 Под наблюдением: {len(operators)}"]
+    for src in sorted(by_source, key=lambda s: (s != "kcell", s)):
+        names = sorted(by_source[src])
+        label = monitor.source_label(src) if src else "Источник не указан"
+        lines.append(f"\n📡 {label} ({len(names)}):")
+        lines.extend(f"   • {n}" for n in names)
+    return "\n".join(lines)
+
+
 def normalize_command(text: str) -> str:
     if not text:
         return ""
@@ -306,9 +322,10 @@ def main():
             # а не при каждом передеплое процесса
             if in_shift and state.can_do_once_today("start_banner", updated_at):
                 tg.send_message(
-                    f"🚀 OperatorMonitor запущен (kcell)\n"
+                    f"🚀 OperatorMonitor запущен ({cfg.telephony_provider})\n"
                     f"{updated_at.strftime('%d.%m.%Y %H:%M')} ({cfg.tz})\n"
-                    f"Смена {cfg.work_start}-{cfg.work_end}, обед {cfg.lunch_start}-{cfg.lunch_end}",
+                    f"Смена {cfg.work_start}-{cfg.work_end}, обед {cfg.lunch_start}-{cfg.lunch_end}\n\n"
+                    + format_watched_operators(operators, monitor),
                     chat_id=cfg.tg_chat_id,
                     message_thread_id=(cfg.tg_thread_id or None),
                 )
